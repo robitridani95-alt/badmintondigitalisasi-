@@ -1,0 +1,254 @@
+<!doctype html>
+<html lang="id"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>V-SKOR Rally Analysis</title>
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@500;800&family=Rajdhani:wght@500;700&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/pose-detection@2.1.3/dist/pose-detection.min.js"></script>
+<style>
+*{box-sizing:border-box}
+body{margin:0;background:#06100b;color:#e9f3ee;font:500 15px Rajdhani,system-ui,sans-serif}
+.app{display:grid;grid-template-columns:320px 1fr;min-height:100vh}
+aside{padding:18px;border-right:1px solid #17352a;display:flex;flex-direction:column;gap:14px;background:#08150f}
+h1{font:800 20px Orbitron,sans-serif;margin:0;color:#9dff2e}
+h2{font:700 15px Rajdhani,sans-serif;margin:0 0 6px;color:#19d3c5}
+p{margin:4px 0 0;color:#8aa397;font-size:14px}
+button,input,select{font:inherit;color:inherit;background:#0f241b;border:1px solid #1f4a39;border-radius:6px;padding:8px 10px}
+button{cursor:pointer;background:#9dff2e;color:#06100b;font-weight:700;border-color:#9dff2e}
+button.g{background:#0f241b;color:#e9f3ee;border-color:#1f4a39}
+:focus-visible{outline:2px solid #19d3c5;outline-offset:2px}
+.r{display:flex;gap:6px;margin-bottom:6px;align-items:center}.r input{flex:1;min-width:0}
+.dot{width:10px;height:26px;border-radius:2px;flex:none}
+main{display:flex;flex-direction:column;align-items:center;justify-content:center;padding:14px;gap:8px}
+canvas{max-width:100%;max-height:calc(100vh - 60px);background:#000;border-radius:8px;cursor:crosshair}
+#msg{color:#8aa397;min-height:22px;text-align:center}
+@media(max-width:800px){.app{grid-template-columns:1fr}aside{border-right:0}}
+</style></head><body>
+<div class="app">
+<aside>
+ <h1>V-SKOR Rally Analysis</h1>
+ <section><h2>1. Video</h2><input type="file" id="f" accept="video/*"></section>
+ <section><h2>2. Lapangan</h2>
+  <button class="g" id="b1">Tandai 4 sudut lapangan</button>
+  <p>Klik garis luar ganda: kiri-dekat, kanan-dekat, kanan-jauh, kiri-jauh.</p></section>
+ <section><h2>3. Pemain</h2>
+  <div class="r"><span class="dot" style="background:#1fd1b5"></span><input class="nm" value="Al’Ze"></div>
+  <div class="r"><span class="dot" style="background:#3b82f6"></span><input class="nm" value="Says"></div>
+  <div class="r"><span class="dot" style="background:#a77bf5"></span><input class="nm" value="ABH"></div>
+  <div class="r"><span class="dot" style="background:#ff6a3d"></span><input class="nm" value="Maul"></div>
+  <button class="g" id="b2">Tandai posisi kaki pemain</button>
+  <p>Klik kaki tiap pemain sesuai urutan nama di atas.</p></section>
+ <section><h2>4. Analisis</h2>
+  <div class="r"><label for="kg">Berat badan (kg)</label><input id="kg" type="number" value="60" min="30" max="150"></div>
+  <div class="r"><label for="rate">Kecepatan</label><select id="rate"><option value="0.5">0,5×</option><option value="1" selected>1×</option></select></div>
+  <div class="r"><label for="q">Resolusi layar</label><select id="q"><option value="1280" selected>1280 (lancar)</option><option value="1920">1920 (tajam)</option></select></div>
+  <div class="r"><label><input type="checkbox" id="rec" checked style="flex:none"> Rekam hasil (.webm)</label></div>
+  <div class="r"><button id="go" style="flex:1">Mulai analisis</button><button class="g" id="pz">Jeda</button></div>
+  <p id="dl"></p></section>
+</aside>
+<main><canvas id="cv" width="720" height="1280"></canvas><div id="msg">Pilih video untuk memulai.</div></main>
+</div>
+<script>
+const $=q=>document.querySelector(q),cv=$('#cv'),g=cv.getContext('2d'),vid=document.createElement('video');
+vid.muted=true;vid.playsInline=true;
+const COL=['#1fd1b5','#3b82f6','#a77bf5','#ff6a3d'],LIM='#9dff2e',MU='#8aa397',names=[...document.querySelectorAll('.nm')];
+let oq=1,lastRun=0,TL=[],EVt=[],EVf=[],PB=0,stopA=0,LY,W=720,H=1280,s=1,mode='',pts=[],hI,hC,det,busy=false,running=false,lastT=-1,rec,P=[],S={},have=0,cur=0,img,gb=[],mk,Kd=1,SW=180,SH=320,yb;
+const sc=document.createElement('canvas'),sx=sc.getContext('2d',{willReadFrequently:true});
+const msg=t=>$('#msg').textContent=t,med=a=>[...a].sort((x,y)=>x-y)[a.length>>1];
+
+/* ---------- homografi (gambar <-> lapangan, meter) ---------- */
+function homog(a,d){const A=[],b=[];for(let i=0;i<4;i++){const[x,y]=a[i],[u,v]=d[i];A.push([x,y,1,0,0,0,-u*x,-u*y]);b.push(u);A.push([0,0,0,x,y,1,-v*x,-v*y]);b.push(v)}
+ for(let i=0;i<8;i++){let p=i;for(let r=i+1;r<8;r++)if(Math.abs(A[r][i])>Math.abs(A[p][i]))p=r;[A[i],A[p]]=[A[p],A[i]];[b[i],b[p]]=[b[p],b[i]];
+  for(let r=i+1;r<8;r++){const f=A[r][i]/A[i][i];for(let c=i;c<8;c++)A[r][c]-=f*A[i][c];b[r]-=f*b[i]}}
+ const x=Array(8);for(let i=7;i>=0;i--){let t=b[i];for(let c=i+1;c<8;c++)t-=A[i][c]*x[c];x[i]=t/A[i][i]}return x}
+const ap=(h,x,y)=>{const w=h[6]*x+h[7]*y+1;return[(h[0]*x+h[1]*y+h[2])/w,(h[3]*x+h[4]*y+h[5])/w]};
+const CT=[[0,13.4],[6.1,13.4],[6.1,0],[0,0]];
+
+/* ---------- tata letak: panel HUD di strip bawah video ---------- */
+function layout(){const wide=W>=H,bw=wide?1100:720,k=W/bw,u=wide?
+ {sp:[16,12,290,112],ty:[16,132,290,100],dc:[322,12,380,220],no:[718,12,150,220],mp:[884,12,200,220],fy:244,bh:284}:
+ {sp:[16,12,340,112],no:[372,12,332,112],ty:[16,132,688,100],dc:[16,240,400,232],mp:[432,240,272,232],fy:480,bh:520};
+ return{wide,bw,k,u,sh:Math.round(u.bh*k)}}
+function fit(){const m=Math.max(W,H+LY.sh);oq=Math.min(1,(+$('#q').value||1280)/m);cv.width=Math.round(W*oq);cv.height=Math.round((H+LY.sh)*oq)}
+$('#q').onchange=()=>{if(LY)fit()};
+/* ---------- input ---------- */
+$('#f').onchange=e=>{const f=e.target.files[0];if(!f)return;running=false;vid.src=URL.createObjectURL(f)};
+vid.onloadeddata=()=>{W=vid.videoWidth;H=vid.videoHeight;s=Math.min(W,H)/720;LY=layout();fit();const mm=512/Math.max(W,H);SW=Math.round(W*mm);SH=Math.round(H*mm);Kd=W/SW;sc.width=SW;sc.height=SH;gb=[new Uint8Array(SW*SH),new Uint8Array(SW*SH)];mk=new Uint8Array(SW*SH);yb=[new Uint8Array(SW*SH),new Uint8Array(SW*SH)];
+ hI=hC=null;pts=[];P=[];mode='';vid.currentTime=.01;msg('Video siap. Lanjut ke langkah 2.')};
+$('#b1').onclick=()=>{if(!vid.videoWidth)return msg('Pilih video dulu.');PB=0;pts=[];hI=hC=null;mode='c';msg('Klik sudut 1/4: kiri-dekat')};
+$('#b2').onclick=()=>{if(!hI)return msg('Tandai lapangan dulu (langkah 2).');PB=0;pts=[];P=[];mode='p';msg('Klik kaki: '+(names[0].value||'pemain 1'))};
+cv.onclick=e=>{if(!mode)return;const r=cv.getBoundingClientRect(),x=(e.clientX-r.left)*W/r.width,y=(e.clientY-r.top)*(H+LY.sh)/r.height;
+ if(mode=='c'){pts.push([x,y]);const L=['kiri-dekat','kanan-dekat','kanan-jauh','kiri-jauh'];
+  if(pts.length==4){hI=homog(pts,CT);hC=homog(CT,pts);mode='';msg('Lapangan tersimpan. Lanjut ke langkah 3.')}else msg(`Klik sudut ${pts.length+1}/4: ${L[pts.length]}`)}
+ else{const i=P.length;P.push({seed:ap(hI,x,y),c:COL[i]});if(P.length==4){mode='';msg('Pemain tersimpan. Tekan Mulai analisis.')}else msg('Klik kaki: '+(names[i+1].value||'pemain '+(i+2)))}};
+$('#pz').onclick=()=>{if(running){stopA=1;return}vid.paused?vid.play():vid.pause()};
+$('#go').onclick=async()=>{if(!hI||P.length<4)return msg('Selesaikan langkah 2 dan 3 dulu.');
+ if(!det){try{msg('Memuat model pose…');await tf.setBackend('webgl');await tf.ready();
+  det=await poseDetection.createDetector(poseDetection.SupportedModels.MoveNet,{modelType:poseDetection.movenet.modelType.MULTIPOSE_LIGHTNING});msg('Menyiapkan model…');await det.estimatePoses(sc)}catch(e){return msg('Model gagal dimuat: periksa koneksi internet.')}}
+ if(running)return;reset();PB=0;TL=[];EVt=[];EVf=[];stopA=0;running=true;$('#go').disabled=true;await pass1();running=false;$('#go').disabled=false;
+ if(!TL.length)return msg('Analisis dihentikan.');
+ PB=1;vid.currentTime=0;vid.playbackRate=+$('#rate').value;if($('#rec').checked)startRec();msg('Memutar hasil analisis…');vid.play()};
+vid.onended=()=>{if(PB){stopRec();msg('Selesai.')}};
+
+function reset(){S={shot:0,rally:0,type:'-',hitter:null,speed:null,lock:null,miss:0,cand:[],ts:[],sp:[],lastSeen:-9,lastHit:-9,rallyOn:false,pend:null,fx:null,tag:null,lastV:null,lostAt:-9,n:0,acq:null};
+ P.forEach((p,i)=>{p.n=names[i].value||'P'+(i+1);p.w=p.seed.slice();p.v=[0,0];p.d=0;p.kc=0;p.tr=[];p.o=null;p.lost=0;p.ovT=-9;p.sg=null;p.raw=p.seed.slice();p.dw=p.seed.slice();p.bh=0;p.t=0});have=0;lastT=-1}
+
+/* ---------- rekam ---------- */
+function startRec(){const ch=[];let o={};for(const m of['video/webm;codecs=vp8','video/webm'])if(MediaRecorder.isTypeSupported(m)){o={mimeType:m,videoBitsPerSecond:5e6};break}
+ rec=new MediaRecorder(cv.captureStream(30),o);rec.ondataavailable=e=>ch.push(e.data);
+ rec.onstop=()=>{const a=document.createElement('a');a.href=URL.createObjectURL(new Blob(ch,{type:'video/webm'}));a.download='vskor-rally.webm';a.textContent='Unduh hasil rekaman';$('#dl').replaceChildren(a)};rec.start()}
+function stopRec(){if(rec&&rec.state!='inactive')rec.stop()}
+
+/* ---------- deteksi shuttle (gerak + terang, ukuran kecil) ---------- */
+function motion(){sx.drawImage(vid,0,0,SW,SH);const d=sx.getImageData(0,0,SW,SH).data,n=SW*SH,gr=gb[cur^=1],pv=gb[cur^1],ye=yb[cur],py=yb[cur^1],m=mk,out=[];img=d;
+ /* gr = terang; ye = kekuningan (jejak kok yang kabur berwarna kuning pucat, latar putih/abu ≈ 0) */
+ for(let i=0;i<n;i++){const r=d[i*4],gg=d[i*4+1],bb=d[i*4+2];gr[i]=r*.3+gg*.59+bb*.11;ye[i]=Math.max(0,(r+gg)/2-bb)}
+ if(have){for(let i=0;i<n;i++){const l=gr[i];m[i]=(l>150&&Math.abs(l-pv[i])>35)||(l>110&&ye[i]>25&&ye[i]-py[i]>15)?1:0}   // kepala putih bergerak ATAU jejak kuning baru
+  for(let i=0;i<n;i++)if(m[i]==1){const st=[i];let a=0,cx=0,cy=0,sw=0,x0=SW,x1=0,y0=SH,y1=0;m[i]=2;
+   while(st.length&&a<200){const j=st.pop(),x=j%SW,y=(j/SW)|0,w=Math.max(1,gr[j]-120);a++;cx+=x*w;cy+=y*w;sw+=w;x0=Math.min(x0,x);x1=Math.max(x1,x);y0=Math.min(y0,y);y1=Math.max(y1,y);   // titik berat condong ke kepala putih
+    for(const q of[j-1,j+1,j-SW,j+SW,j-SW-1,j-SW+1,j+SW-1,j+SW+1])if(q>=0&&q<n&&m[q]==1&&Math.abs(q%SW-x)<2){m[q]=2;st.push(q)}}
+   const bw=x1-x0,bh=y1-y0;if(a>=3&&a<200&&Math.max(bw,bh)<40&&Math.min(bw,bh)<16)out.push({x:cx/sw*Kd,y:cy/sw*Kd})}}   // boleh memanjang (jejak), tetap tipis
+ have=1;return out}
+const inBody=(o,b)=>{const q=[5,6,11,12].map(i=>o.k[i]),xs=q.map(a=>a.x),ys=q.map(a=>a.y),m=30*s;
+ return b.x>Math.min(...xs)-m&&b.x<Math.max(...xs)+m&&b.y>Math.min(...ys)-m&&b.y<Math.max(...ys)+m};
+
+/* ---------- pelacakan pemain ---------- */
+/* ---------- pelacakan: identitas pemain terkunci (posisi + warna baju) ---------- */
+function sig(k){const q=[5,6,11,12].filter(i=>k[i].score>.25).map(i=>k[i]);if(q.length<3||!img)return null;
+ const xs=q.map(a=>a.x/Kd),ys=q.map(a=>a.y/Kd),X0=Math.min(...xs),X1=Math.max(...xs),Y0=Math.min(...ys),Y1=Math.max(...ys),mx=(X1-X0)*.2,my=(Y1-Y0)*.2;
+ const x0=Math.max(0,Math.round(X0+mx)),x1=Math.min(SW-1,Math.round(X1-mx)),y0=Math.max(0,Math.round(Y0+my)),y1=Math.min(SH-1,Math.round(Y1-my));
+ if(x1-x0<1||y1-y0<2)return null;const h=new Float32Array(64);let n=0;
+ for(let y=y0;y<=y1;y++)for(let x=x0;x<=x1;x++){const i=(y*SW+x)*4;h[(img[i]>>6)*16+(img[i+1]>>6)*4+(img[i+2]>>6)]++;n++}
+ for(let i=0;i<64;i++)h[i]/=n;return{h,n}}
+const hd=(a,b)=>{if(!a||!b||a.n<20||b.n<12)return .35;let m=0;for(let i=0;i<64;i++)m+=Math.min(a.h[i],b.h[i]);return 1-m};
+const UN=1.2;
+function assign(cost,np,nc){let best=1e9,bs=Array(np).fill(-1);const cur=Array(np).fill(-1),used=Array(nc).fill(0);
+ (function go(i,sum){if(sum>=best)return;if(i==np){best=sum;bs=cur.slice();return}
+  for(let j=-1;j<nc;j++){if(j>=0&&used[j])continue;const c=j<0?UN:cost[i][j];if(c==null)continue;cur[i]=j;if(j>=0)used[j]=1;go(i+1,sum+c);if(j>=0)used[j]=0}})(0,0);return bs}
+function track(ps,t,dt){const c=[],kg=+$('#kg').value||60;
+ for(const p of ps){if(p.score<.25)continue;const k=p.keypoints,ok=i=>k[i].score>.25,an=[15,16].filter(ok).map(i=>k[i]),hp=[11,12].filter(ok).map(i=>k[i]),fp=an.length?an:hp;
+  if(!fp.length||!ok(0)&&!ok(5)&&!ok(6))continue;
+  const fx=fp.reduce((a,b)=>a+b.x,0)/fp.length;let fy=fp.reduce((a,b)=>a+b.y,0)/fp.length;
+  if(!an.length)fy+=ok(0)?Math.max(0,fy-k[0].y):50*s;                       // hanya pinggul terlihat: kaki diperkirakan
+  const w=ap(hI,fx,fy);if(w[0]<-1.5||w[0]>7.6||w[1]<-2||w[1]>15.4)continue;  // di luar lapangan (kursi wasit dll) diabaikan
+  const vis=k.filter(a=>a.score>.2),top=Math.min(...vis.map(a=>a.y)),bh=fy-top;if(bh<40*s)continue;
+  c.push({w,fx,fy,k,top,bh,sg:sig(k),ov:[9,10].some(i=>k[i].score>.3&&k[i].y<k[0].y-.1*bh)})}
+ // biaya pasangan pemain-kandidat: jarak dari posisi prediksi + beda warna baju; penugasan global (satu orang tidak bisa dipakai dua cincin)
+ const cost=P.map(p=>{const pr=[p.w[0]+p.v[0]*dt,p.w[1]+p.v[1]*dt],gate=p.sg?2.5+Math.min(4,2*p.lost):2;
+  return c.map(o=>{const d=Math.hypot(o.w[0]-pr[0],o.w[1]-pr[1]);return d>gate?null:p.sg?d/2.5+1.2*hd(p.sg,o.sg):d/1.5})});
+ const m=assign(cost,P.length,c.length);
+ P.forEach((p,i)=>{const j=m[i];
+  if(j<0){p.lost+=dt;p.o=null;const e=Math.exp(-dt*3);p.v=[p.v[0]*e,p.v[1]*e];p.w=[p.w[0]+p.v[0]*dt*.5,p.w[1]+p.v[1]*dt*.5];p.kc+=2.5*kg*dt/3600;p.raw=p.w.slice();return}
+  const o=c[j];if(!p.sg&&o.sg&&o.sg.n>=20)p.sg=o.sg;
+  p.lost=0;p.o=o;p.raw=o.w.slice();if(o.ov)p.ovT=t;p.t=t;p.bh=p.bh?p.bh*.6+o.bh*.4:o.bh;
+  const nw=[p.w[0]+(o.w[0]-p.w[0])*.6,p.w[1]+(o.w[1]-p.w[1])*.6],d=Math.hypot(nw[0]-p.w[0],nw[1]-p.w[1]);
+  if(dt>0){const sp=d/dt;p.v=[(nw[0]-p.w[0])/dt*.5+p.v[0]*.5,(nw[1]-p.w[1])/dt*.5+p.v[1]*.5];
+   if(d>.05&&sp<9)p.d+=d;p.kc+=(2.5+1.2*Math.min(sp,6))*kg*dt/3600}
+  p.w=nw;p.tr.push(nw.slice());if(p.tr.length>25)p.tr.shift()})}
+
+/* ---------- shuttle, pukulan, jenis pukulan ---------- */
+function hit(t,b){if(t-S.lastHit<.35)return;let bd=1e9,h=null;
+ for(const p of P)if(p.o)for(const i of[9,10]){const q=p.o.k[i],d=Math.hypot(q.x-b.x,q.y-b.y);if(d<bd){bd=d;h=p}}
+ if(!h)return;if(!S.rallyOn){S.rally++;S.shot=0}S.rallyOn=true;S.lastHit=t;S.shot++;S.hitter=h;
+ S.pend={t,h,first:S.shot==1,ov:t-h.ovT<.4,y0:b.y,mn:b.y,mx:0}}
+function shuttle(t,dt,bl){bl=bl.filter(b=>!P.some(p=>p.o&&inBody(p.o,b)));const Z=S;
+ if(Z.lock){const L=Z.lock,pr={x:L.x+L.vx*dt,y:L.y+L.vy*dt};let pk=null,bd=70*s*(1+Z.miss*.6);
+  for(const b of bl){const d=Math.hypot(b.x-pr.x,b.y-pr.y);if(d<bd){bd=d;pk=b}}
+  if(pk&&dt>0){const vx=(pk.x-L.x)/dt,vy=(pk.y-L.y)/dt,nx=L.vx*.5+vx*.5,ny=L.vy*.5+vy*.5,a=ap(hI,L.x,L.y),c=ap(hI,pk.x,pk.y);
+   Z.sp.push(Math.min(130,Math.hypot(c[0]-a[0],c[1]-a[1])/dt*3.6));if(Z.sp.length>5)Z.sp.shift();
+   const dot=(L.vx*nx+L.vy*ny)/(Math.hypot(L.vx,L.vy)*Math.hypot(nx,ny)+1e-6);
+   Z.lock={x:pk.x,y:pk.y,vx:nx,vy:ny};Z.miss=0;Z.lastSeen=t;Z.n++;Z.ts.push([pk.x,pk.y]);if(Z.ts.length>9)Z.ts.shift();
+   if(Z.n==4&&Z.acq){if(Z.acq.go)hit(Z.acq.t,Z.acq.b);Z.acq=null}
+   if(Z.n>4&&dot<-.2&&Math.hypot(nx,ny)>60*s)hit(t,pk)}
+  else if(++Z.miss>5){Z.lastV=[L.vx,L.vy];Z.lostAt=t;Z.lock=null;Z.sp=[];Z.acq=null}}
+ else{for(const a of Z.cand){for(const b of bl){const d=Math.hypot(a.x-b.x,a.y-b.y);
+   if(d>6*s&&d<110*s&&dt>0){const vx=(b.x-a.x)/dt,vy=(b.y-a.y)/dt;Z.lock={x:b.x,y:b.y,vx,vy};Z.miss=0;Z.lastSeen=t;Z.sp=[];Z.ts=[[b.x,b.y]];Z.n=1;
+    const rv=Z.lastV&&t-Z.lostAt<.9&&Z.lastV[0]*vx+Z.lastV[1]*vy<0;Z.acq={t,b,go:!Z.rallyOn||rv};break}}
+   if(Z.lock)break}}
+ Z.cand=bl;
+ const pd=Z.pend;if(pd){if(Z.lock)pd.mn=Math.min(pd.mn,Z.lock.y);if(Z.sp.length)pd.mx=Math.max(pd.mx,med(Z.sp));
+  if(t-pd.t>.4){const rise=(pd.y0-pd.mn)/H,ty=pd.first?'SERVE':pd.ov&&pd.mx>=45?'SMASH':pd.ov&&rise>.12?'CLEAR':pd.ov?'DROP SHOT':'DRIVE';
+   Z.type=ty;Z.hitter=pd.h;Z.speed=pd.mx||null;Z.tag={t:performance.now(),h:pd.h,ty};
+   if(ty=='SMASH'&&Z.lock)Z.fx={t:performance.now(),x:Z.lock.x,y:Z.lock.y};Z.pend=null}}
+ if(Z.rallyOn&&t-Z.lastSeen>2.5){Z.rallyOn=false;Z.shot=0;Z.type='-';Z.speed=null;Z.pend=null;Z.lock=null}}
+
+async function analyse(){busy=true;const t=vid.currentTime,dt=lastT<0?0:Math.max(.001,t-lastT);lastT=t;
+ try{const bl=motion(),ps=await det.estimatePoses(sc,{maxPoses:6});for(const p of ps)for(const k of p.keypoints){k.x*=Kd;k.y*=Kd}track(ps,t,dt);shuttle(t,dt,bl)}catch(e){}busy=false}
+
+/* ---------- gambar HUD ---------- */
+const T=(t,x,y,z,c,al='left',w=700,f='Orbitron')=>{g.font=`${w} ${z*s}px ${f},Rajdhani,sans-serif`;g.fillStyle=c;g.textAlign=al;g.fillText(t,x*s,y*s)};
+function pan(x,y,w,h){x*=s;y*=s;w*=s;h*=s;const c=14*s;g.beginPath();g.moveTo(x,y);g.lineTo(x+w-c,y);g.lineTo(x+w,y+c);g.lineTo(x+w,y+h);g.lineTo(x+c,y+h);g.lineTo(x,y+h-c);g.closePath();
+ g.fillStyle='rgba(8,20,15,.78)';g.fill();g.strokeStyle='rgba(157,255,46,.35)';g.lineWidth=1.5*s;g.stroke()}
+function ring(w,r,a0,a1){g.beginPath();for(let i=0;i<=24;i++){const a=a0+(a1-a0)*i/24,q=ap(hC,w[0]+Math.cos(a)*r,w[1]+Math.sin(a)*r);i?g.lineTo(q[0],q[1]):g.moveTo(q[0],q[1])}g.stroke()}
+function tag(txt,x,y,col){g.font=`700 ${15*s}px Rajdhani,sans-serif`;const w=g.measureText(txt).width+16*s;
+ g.fillStyle='rgba(8,20,15,.88)';g.fillRect(x-w/2,y-9*s,w,19*s);g.fillStyle=col;g.fillRect(x-w/2,y-9*s,4*s,19*s);
+ g.fillRect(x-s,y+10*s,2*s,12*s);g.fillStyle='#fff';g.textAlign='left';g.fillText(txt,x-w/2+10*s,y+5*s)}
+function court(x,y,w,h){const X=v=>x+v/6.1*w,Y=v=>y+v/13.4*h;g.strokeStyle='rgba(255,255,255,.6)';g.lineWidth=1.3*s;g.strokeRect(x,y,w,h);
+ g.beginPath();for(const[a,b,c,d]of[[0,6.7,6.1,6.7],[0,4.72,6.1,4.72],[0,8.68,6.1,8.68],[.46,0,.46,13.4],[5.64,0,5.64,13.4],[3.05,0,3.05,4.72],[3.05,8.68,3.05,13.4]]){g.moveTo(X(a),Y(b));g.lineTo(X(c),Y(d))}g.stroke();return[X,Y]}
+
+function hud(now){const t=vid.currentTime,Wb=W/s,Hb=H/s,Z=S,live=running||Z.rally>0;
+ if(live)for(const p of P){g.save();g.globalAlpha=1-Math.min(.7,p.lost*.25);g.lineWidth=3*s;g.lineCap='round';g.strokeStyle=p.c;
+  const ph=now/700,r=.5+Math.min(.5,Math.hypot(p.v[0],p.v[1])*.12);g.save();g.globalAlpha*=.3;g.lineWidth=2*s;ring(p.dw,r+.15,0,6.3);g.globalAlpha*=.4;g.fillStyle=p.c;g.fill();g.restore();ring(p.dw,r,ph,ph+2.2);ring(p.dw,r+.3,-ph*1.3+1,-ph*1.3+4);ring(p.dw,r+.6,ph*.8+2,ph*.8+4.4);
+  if(Z.tag&&Z.tag.h===p&&now-Z.tag.t<900){const k=(now-Z.tag.t)/900;g.globalAlpha=1-k;g.strokeStyle=LIM;ring(p.dw,.9+k*.7,0,6.3)}g.restore()}
+ for(const p of P){if(p.lost>3||!p.bh)continue;const o=ap(hC,p.dw[0],p.dw[1]),hot=Z.tag&&Z.tag.h===p&&now-Z.tag.t<1400;
+  tag(hot?`${p.n}  ${Z.tag.ty}`:p.n,o[0],o[1]-p.bh-36*s,hot?LIM:p.c)}
+ if(Z.lock&&Z.n>3){const L=S.dl?{x:S.dl[0],y:S.dl[1]}:Z.lock,sp=Z.sp.length?Math.round(med(Z.sp)):null;g.save();g.strokeStyle=LIM;g.lineWidth=2*s;g.beginPath();Z.ts.forEach((q,i)=>i?g.lineTo(q[0],q[1]):g.moveTo(q[0],q[1]));g.stroke();
+  g.beginPath();g.arc(L.x,L.y,10*s,0,6.3);g.stroke();g.fillStyle='rgba(8,20,15,.88)';g.fillRect(L.x+14*s,L.y-26*s,78*s,30*s);
+  g.fillStyle=LIM;g.font=`700 ${9*s}px Rajdhani,sans-serif`;g.textAlign='left';g.fillText('LOCK ON',L.x+19*s,L.y-15*s);g.fillStyle='#fff';g.font=`700 ${12*s}px Rajdhani,sans-serif`;g.fillText(sp==null?'…':sp+' km/h',L.x+19*s,L.y-2*s);g.restore()}
+ if(Z.fx&&now-Z.fx.t<900){const k=(now-Z.fx.t)/900,f=Z.fx;g.save();g.translate(f.x,f.y);g.strokeStyle=LIM;g.lineWidth=3*s;g.globalAlpha=1-k;
+  for(let i=0;i<12;i++){const a=i*.5236,r0=(14+k*20)*s,r1=(30+k*34)*s;g.beginPath();g.moveTo(Math.cos(a)*r0,Math.sin(a)*r0);g.lineTo(Math.cos(a)*r1,Math.sin(a)*r1);g.stroke()}
+  g.transform(1,0,-.2,1,0,0);g.font=`800 ${34*s}px Orbitron,sans-serif`;g.fillStyle=LIM;g.textAlign='center';g.fillText('SMASH!',0,-58*s);g.restore()}
+ strip(now,Z,t)}
+
+function strip(now,Z,t){const L=LY,so=s,u=L.u;s=L.k;g.save();g.translate(0,H);
+ const meas=Z.speed&&(Z.lock||t-Z.lastSeen<1.5);let[x,y,w,h]=u.sp;
+ pan(x,y,w,h);T('🏸',x+16,y+66,40,LIM);T('SHUTTLE SPEED',x+76,y+28,14,'#cfe','left',500);
+ if(meas){const v=String(Math.round(Z.speed));T(v,x+76,y+82,48,LIM);T('km/h',x+76+v.length*34,y+82,18,'#cfe','left',500)}else T('not measured',x+76,y+76,24,MU,'left',500);
+ T('avg. horizontal · estimate',x+76,y+104,13,MU,'left',500,'Rajdhani');
+ [x,y,w,h]=u.ty;pan(x,y,w,h);T('SHOT TYPE',x+76,y+26,14,'#cfe','left',500);T(Z.type,x+76,y+70,34,Z.type=='-'?MU:LIM);
+ if(Z.hitter){g.fillStyle=Z.hitter.c;g.beginPath();g.arc((x+80)*s,(y+84)*s,4*s,0,6.3);g.fill();T(`${Z.hitter.n} · shot ${Z.shot}`,x+90,y+88,13,'#cfe','left',500,'Rajdhani')}
+ [x,y,w,h]=u.no;pan(x,y,w,h);const o=Math.max(0,(h-124)/2),cx=x+w/2;
+ T('SHOT NO.',cx,y+o+28,14,'#cfe','center',500);T(String(Z.shot||0).padStart(2,'0'),cx,y+o+84,56,'#fff','center',800);
+ T(Z.rallyOn?'rally '+Z.rally:'waiting for rally',cx,y+o+110,13,MU,'center',500,'Rajdhani');
+ [x,y,w,h]=u.dc;pan(x,y,w,h);T('DISTANCE & CALORIES',x+36,y+32,13,'#cfe','left',700);
+ P.forEach((p,i)=>{const yy=y+72+i*34;g.fillStyle=p.c;g.beginPath();g.arc((x+24)*s,(yy-5)*s,6*s,0,6.3);g.fill();
+  T(p.n,x+42,yy,16,'#fff','left',700,'Rajdhani');T(p.kc.toFixed(1)+' kcal',x+w*.5,yy,15,LIM,'left',700,'Rajdhani');T(Math.round(p.d)+' m',x+w-14,yy,16,'#fff','right',700,'Rajdhani')});
+ T('floor path · calories estimated',x+16,y+h-12,12,MU,'left',500,'Rajdhani');
+ [x,y,w,h]=u.mp;pan(x,y,w,h);T('COURT MAP',x+30,y+28,13,'#cfe','left',700);
+ const ch=h-52,cw=ch*6.1/13.4,[X,Y]=court((x+(w-cw)/2)*s,(y+40)*s,cw*s,ch*s);
+ for(const p of P){g.strokeStyle=p.c;g.globalAlpha=.7;g.lineWidth=2*s;g.beginPath();p.tr.forEach((q,i)=>i?g.lineTo(X(q[0]),Y(q[1])):g.moveTo(X(q[0]),Y(q[1])));g.stroke();g.globalAlpha=1;
+  g.fillStyle=p.c;g.beginPath();g.arc(X(p.dw[0]),Y(p.dw[1]),6.5*s,0,6.3);g.fill();
+  if(Z.tag&&Z.tag.h===p&&now-Z.tag.t<1200){g.strokeStyle=LIM;g.lineWidth=2*s;g.beginPath();g.arc(X(p.dw[0]),Y(p.dw[1]),10*s,0,6.3);g.stroke()}}
+ g.fillStyle='rgba(8,20,15,.9)';g.fillRect(0,u.fy*s,W,40*s);
+ T('V-SKOR',16,u.fy+27,20,LIM,'left',800);T('Shots reviewed by players · motion & speed estimated',L.bw/2,u.fy+26,L.wide?14:12,'#cfe','center',500,'Rajdhani');T('v-skor.com',L.bw-16,u.fy+26,14,'#19d3c5','right',700,'Rajdhani');
+ g.restore();s=so}
+
+/* ---------- tahap 1: analisis frame demi frame; tahap 2: putar ulang dengan HUD tepat di frame yang sama ---------- */
+const seek=x=>new Promise(r=>{let d=0;const f=()=>{if(d)return;d=1;vid.removeEventListener('seeked',f);r()};vid.addEventListener('seeked',f);setTimeout(f,500);vid.currentTime=x});
+async function pass1(){vid.pause();const dur=vid.duration;let lt=null,lf=null;
+ for(let x=0;x<dur&&!stopA;x+=1/15){await seek(x);await analyse();const tc=vid.currentTime;
+  TL.push({t:tc,p:P.map(p=>({w:p.raw.slice(),bh:p.bh,lost:p.lost,kc:p.kc,d:p.d,v:p.v.slice()})),
+   s:{shot:S.shot,rally:S.rally,type:S.type,hi:P.indexOf(S.hitter),speed:S.speed,on:S.rallyOn,ls:S.lastSeen,lk:S.lock?[S.lock.x,S.lock.y]:null,sp:S.sp.length?med(S.sp):null,n:S.n}});
+  if(S.tag&&S.tag!==lt){lt=S.tag;EVt.push({t:tc,h:P.indexOf(S.tag.h),ty:S.tag.ty})}
+  if(S.fx&&S.fx!==lf){lf=S.fx;EVf.push({t:tc,x:S.fx.x,y:S.fx.y})}
+  msg(`Menganalisis ${Math.round(x/dur*100)}% · tekan Jeda untuk berhenti`)}
+ const K=[1,2,3,2,1];                                   // penghalusan dua arah: tanpa ketertinggalan
+ P.forEach((_,i)=>{const raw=TL.map(f=>f.p[i].w);TL.forEach((f,j)=>{let a=0,b=0,z=0;for(let k=-2;k<=2;k++){const q=raw[Math.min(TL.length-1,Math.max(0,j+k))],w=K[k+2];a+=q[0]*w;b+=q[1]*w;z+=w}f.p[i].w=[a/z,b/z]})})}
+function apply(tc,now){if(!TL.length)return;let lo=0,hi=TL.length-1;while(lo<hi){const m=(lo+hi+1)>>1;if(TL[m].t<=tc)lo=m;else hi=m-1}
+ const a=TL[lo],b=TL[Math.min(lo+1,TL.length-1)],f=b.t>a.t?Math.min(1,Math.max(0,(tc-a.t)/(b.t-a.t))):0,L=(x,y)=>x+(y-x)*f;
+ P.forEach((p,i)=>{const x=a.p[i],y=b.p[i];p.dw=[L(x.w[0],y.w[0]),L(x.w[1],y.w[1])];p.bh=x.bh;p.lost=x.lost;p.kc=x.kc;p.d=x.d;p.v=x.v;p.tr=[];for(let j=Math.max(0,lo-24);j<=lo;j++)p.tr.push(TL[j].p[i].w)});
+ const q=a.s,lk=q.lk&&b.s.lk?[L(q.lk[0],b.s.lk[0]),L(q.lk[1],b.s.lk[1])]:q.lk,ts=[];for(let j=Math.max(0,lo-8);j<=lo;j++)if(TL[j].s.lk)ts.push(TL[j].s.lk);
+ S={shot:q.shot,rally:q.rally,type:q.type,hitter:P[q.hi]||null,speed:q.speed,rallyOn:q.on,lastSeen:q.ls,lock:lk?{x:lk[0],y:lk[1]}:null,sp:q.sp==null?[]:[q.sp],n:q.n,ts,dl:lk,tag:null,fx:null};
+ let e=null;for(let j=EVt.length-1;j>=0;j--)if(EVt[j].t<=tc){e=EVt[j];break}
+ if(e&&tc-e.t<1.5)S.tag={t:now-(tc-e.t)*1000,h:P[e.h],ty:e.ty};
+ e=null;for(let j=EVf.length-1;j>=0;j--)if(EVf[j].t<=tc){e=EVf[j];break}
+ if(e&&tc-e.t<1)S.fx={t:now-(tc-e.t)*1000,x:e.x,y:e.y}}
+function smooth(now){const dtr=Math.min(.1,(now-(smooth.l||now))/1000);smooth.l=now;const tc=vid.currentTime,a=1-Math.exp(-dtr/.05);
+ for(const p of P){const age=Math.max(0,Math.min(.25,tc-(p.t||tc))),tx=p.w[0]+p.v[0]*age,ty=p.w[1]+p.v[1]*age;p.dw[0]+=(tx-p.dw[0])*a;p.dw[1]+=(ty-p.dw[1])*a}
+ const L=S.lock;if(L){const age=Math.max(0,Math.min(.2,tc-S.lastSeen)),tx=L.x+L.vx*age,ty=L.y+L.vy*age;if(!S.dl)S.dl=[tx,ty];S.dl[0]+=(tx-S.dl[0])*Math.min(1,a*2);S.dl[1]+=(ty-S.dl[1])*Math.min(1,a*2)}else S.dl=null}
+function loop(now){g.setTransform(oq,0,0,oq,0,0);if(LY){g.fillStyle='#06100b';g.fillRect(0,0,W,H+LY.sh)}if(vid.readyState>1)g.drawImage(vid,0,0,W,H);
+ if(PB&&TL.length){apply(vid.currentTime,now);hud(now)}else if(hI&&P.length==4&&P[0].tr){smooth(now);hud(now)}
+ if(hC&&!running){g.save();g.strokeStyle=LIM;g.setLineDash([10*s,8*s]);g.lineWidth=2*s;g.beginPath();CT.forEach((c,i)=>{const q=ap(hC,c[0],c[1]);i?g.lineTo(q[0],q[1]):g.moveTo(q[0],q[1])});g.closePath();g.stroke();g.restore()}
+ pts.forEach((q,i)=>{if(mode=='c'){g.fillStyle=LIM;g.beginPath();g.arc(q[0],q[1],8*s,0,6.3);g.fill();T(String(i+1),q[0]/s+12,q[1]/s-10,16,'#fff')}});
+ requestAnimationFrame(loop)}
+requestAnimationFrame(loop);
+</script></body></html>
